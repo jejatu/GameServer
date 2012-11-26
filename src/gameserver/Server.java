@@ -104,6 +104,7 @@ public class Server {
 	}
 	
 	private void checkPackets(Client client) {
+		// checks the packet header for confirmations of past packets
 		Iterator<Packet> i = client.packets.iterator();
 		while (i.hasNext()) {
 			int packetNumber = i.next().id;
@@ -118,6 +119,7 @@ public class Server {
 	}
 	
 	private void resendLostPackets() {
+		// if client hasn't confirmed a packet in a second it is resend
 		for (Client client : clients) {
 			List<String> lostMessages = new ArrayList<String>();
 			Iterator<Packet> i = client.packets.iterator();
