@@ -9,19 +9,21 @@ import java.util.Iterator;
 import java.util.List;
 
 public class Server {
-	public static final int PORT = 4444;
-	public static final int BUFFER_SIZE = 256;
-	public static final int PROTOCOL_ID = 145501337;
-	DatagramChannel channel;
-	List<Client> clients = new ArrayList<Client>();
+	private static final int BUFFER_SIZE = 256;
+	private int protocolId = 0;
+	private DatagramChannel channel;
+	private List<Client> clients = new ArrayList<Client>();
+
+	public int timeout = 10000;
 	
-	public void connect() throws IOException {
+	public void start(int id, int port) throws IOException {
+		protocolId = id;
 		channel = DatagramChannel.open();
 		channel.configureBlocking(false);
-		channel.socket().bind(new InetSocketAddress(PORT));
+		channel.socket().bind(new InetSocketAddress(port));
 	}
 	
-	public void disconnect() throws IOException {
+	public void end() throws IOException {
 		channel.disconnect();
 		channel.close();
 	}
@@ -30,7 +32,6 @@ public class Server {
 		listen();
 		send();
 		checkConnections();
-		System.out.println(clients.size());
 	}
 	
 	private void handlePacket(InetSocketAddress address, ByteBuffer buffer) {
@@ -46,7 +47,6 @@ public class Server {
 	
 	private void handleClient(Client client, ByteBuffer buffer) {
 		client.lastPacketTime = System.currentTimeMillis();
-		System.out.println(new String(buffer.array()).trim());
 	}
 	
 	private void acceptConnection(InetSocketAddress address, ByteBuffer buffer) {
@@ -60,7 +60,7 @@ public class Server {
 		Iterator<Client> i = clients.iterator();
 		while (i.hasNext()) {
 			Client client = i.next();
-			if (System.currentTimeMillis() - client.lastPacketTime > 10000) {
+			if (System.currentTimeMillis() - client.lastPacketTime > timeout) {
 				i.remove();
 			}
 		}
@@ -74,8 +74,7 @@ public class Server {
 		buffer.flip();
 		if (address != null) {
 			int id = buffer.getInt();
-			System.out.println(id);
-			if (id == PROTOCOL_ID) {
+			if (id == protocolId) {
 				handlePacket(address, buffer);
 			}
 		}
@@ -86,7 +85,7 @@ public class Server {
 		buffer.clear();
 		
 		String data = "Time: " + System.currentTimeMillis();
-		buffer.putInt(PROTOCOL_ID);
+		buffer.putInt(protocolId);
 		buffer.put(data.getBytes());
 		buffer.flip();
 		
