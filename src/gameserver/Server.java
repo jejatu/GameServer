@@ -35,6 +35,7 @@ public class Server {
 	public void tick() throws IOException {
 		// do this once every loop
 		listen();
+		resendLostPackets();
 		checkConnections();
 	}
 	
@@ -62,8 +63,7 @@ public class Server {
 		// if not, accept the new client
 		// if yes, handle request
 		for (Client client : clients) {
-			if (address.getHostName().equals(client.address.getHostName()) &&
-					address.getPort() == client.address.getPort()) {
+			if (address.equals(client.address)) {
 				handleClient(client, buffer);
 				return;
 			}
@@ -76,27 +76,61 @@ public class Server {
 		client.lastPacketTime = System.currentTimeMillis();
 		int sequence = buffer.getInt();
 		int ack = buffer.getInt();
+		int ackBitField = buffer.getInt();
 		// take the packet id client send and check if it's the most recent
 		// if yes, save it and update the queue of packets ids received
 		// with the queue we can tell to the client which packets we have received
-		if (sequence > client.remotePacketNumber) {
+		if (isMostRecentPacket(sequence, client.remotePacketNumber, Integer.MAX_VALUE)) {
 			client.packetNumberQueue.add(client.remotePacketNumber);
 			client.remotePacketNumber = sequence;
+			client.ack = ack;
+			client.remoteAckBitfield = ackBitField;
+			checkPackets(client);
 			Iterator<Integer> i = client.packetNumberQueue.iterator();
 			while (i.hasNext()) {
 				int packetNumber = i.next().intValue();
+				client.localAckBitfield = client.localAckBitfield | (1 << (client.remotePacketNumber - packetNumber - 1));
 				if (client.remotePacketNumber - 32 > packetNumber) {
 					i.remove();
 				}
 			}
 		}
 		
-		System.out.println("received: " + sequence + " " + clients.size());
-		
-		try {
-			send(client, "pong");
-		} catch (IOException e) {
-			e.printStackTrace();
+		send(client, "pong " + System.currentTimeMillis());
+	}
+	
+	private boolean isMostRecentPacket(int p1, int p2, int maxNumber) {
+		return (p1 > p2) && (p1 - p2 <= maxNumber / 2) || (p2 > p1) && (p2 - p1 > maxNumber / 2);
+	}
+	
+	private void checkPackets(Client client) {
+		Iterator<Packet> i = client.packets.iterator();
+		while (i.hasNext()) {
+			int packetNumber = i.next().id;
+			if (client.ack == packetNumber) {
+				i.remove();
+			} else {
+				if ((client.remoteAckBitfield & (1 << (client.ack - packetNumber - 1))) != 0) {
+					i.remove();
+				}
+			}
+		}
+	}
+	
+	private void resendLostPackets() {
+		for (Client client : clients) {
+			List<String> lostMessages = new ArrayList<String>();
+			Iterator<Packet> i = client.packets.iterator();
+			while (i.hasNext()) {
+				Packet packet = i.next();
+				if (System.currentTimeMillis() - packet.sentTime > 1000) {
+					lostMessages.add(new String(packet.data));
+					i.remove();
+				} 
+			}
+			for (String message : lostMessages) {
+				send(client, message);
+			}
 		}
 	}
 	
@@ -116,24 +150,28 @@ public class Server {
 		}
 	}
 	
-	private void send(Client client, String data) throws IOException {
-		// send a packet containing a fixed header and data
-		ByteBuffer buffer = ByteBuffer.allocate(256);
-		buffer.clear();
-		buffer.putInt(1337); // protocol id
-		buffer.putInt(client.localPacketNumber); // current known sent packet number
-		buffer.putInt(client.remotePacketNumber); // current known received packet number
-		int ackBitField = 0;
-		for (Integer integer : client.packetNumberQueue) {
-			ackBitField = ackBitField | (1 << (client.remotePacketNumber - integer - 1));
+	private void send(Client client, String data) {
+		// send a packet containing a header and the data
+		try {
+			ByteBuffer buffer = ByteBuffer.allocate(256);
+			buffer.clear();
+			buffer.putInt(1337); // protocol id
+			buffer.putInt(client.localPacketNumber); // current known sent packet number
+			buffer.putInt(client.remotePacketNumber); // current known received packet number
+			buffer.putInt(client.localAckBitfield);
+			buffer.put(data.getBytes());
+			buffer.flip();
+			channel.send(buffer, client.address);
+			Packet packet = new Packet();
+			packet.id = client.localPacketNumber;
+			packet.data = new String(data);
+			packet.sentTime = System.currentTimeMillis();
+			client.packets.add(packet);
+			
+			client.localPacketNumber++;
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
 		}
-		// ackBitField tells the client which packets we have received relative to the current remotePacketNumber
-		buffer.putInt(ackBitField);
-		buffer.put(data.getBytes());
-		buffer.flip();
-		channel.send(buffer, client.address);
-		System.out.println("sent: " + ackBitField);
-		
-		client.localPacketNumber++;
 	}
 }

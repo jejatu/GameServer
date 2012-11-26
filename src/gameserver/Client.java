@@ -9,5 +9,9 @@ public class Client {
 	long lastPacketTime = 0;
 	int localPacketNumber = 0;
 	int remotePacketNumber = 0;
+	int ack = 0;
+	int localAckBitfield = 0;
+	int remoteAckBitfield = 0;
 	List<Integer> packetNumberQueue = new ArrayList<Integer>();
+	List<Packet> packets = new ArrayList<Packet>();
 }
