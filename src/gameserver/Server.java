@@ -9,21 +9,28 @@ import java.util.Iterator;
 import java.util.List;
 
 public class Server {
-	private static final int BUFFER_SIZE = 256;
+	private int bufferSize = 256;
 	private int protocolId = 0;
 	private DatagramChannel channel;
 	private List<Client> clients = new ArrayList<Client>();
+	private float roundTripTime = 0;
+	private int queueDelay = 33;
+	private boolean goodMode = true;
+	private long lastHighLatencyTime = 0;
+	private long modeChangeTime = 0;
+	private long lastModeChange = 0;
 
 	public int timeout = 10000;
 	public boolean connected = false;
 	
-	public void start(int id, int port) throws IOException {
+	public void start(int id, int port, int bufferSize) throws IOException {
 		// start the server by opening non-blocking udp port
 		protocolId = id;
 		channel = DatagramChannel.open();
 		channel.configureBlocking(false);
 		channel.socket().bind(new InetSocketAddress(port));
 		connected = true;
+		this.bufferSize = bufferSize;
 	}
 	
 	public void end() throws IOException {
@@ -33,10 +40,40 @@ public class Server {
 	}
 	
 	public void tick() throws IOException {
-		// do this once every loop
+		simpleBinaryFlowControl();
 		listen();
-		resendLostPackets();
+		requeueLostPackets();
+		send();
 		checkConnections();
+	}
+	
+	private void simpleBinaryFlowControl() {
+		// a simple flow control from
+		// http://gafferongames.com/networking-for-game-programmers/reliability-and-flow-control/
+		if (goodMode) {
+			queueDelay = 33;
+			if (roundTripTime > 250) {
+				if (System.currentTimeMillis() - lastModeChange < 10000) {
+					if (modeChangeTime * 2 < 60000) modeChangeTime *= 2;
+				}
+				lastModeChange = System.currentTimeMillis();
+				goodMode = false;
+			}
+			if (System.currentTimeMillis() - lastModeChange >= 10000) {
+				if (modeChangeTime / 2 >= 1000) { 
+					modeChangeTime /= 2;
+				}
+			}
+		} else {
+			queueDelay = 100;
+			if (roundTripTime > 250) {
+				lastHighLatencyTime = System.currentTimeMillis();
+			}
+			if (System.currentTimeMillis() - lastHighLatencyTime > modeChangeTime) {
+				lastModeChange = System.currentTimeMillis();
+				goodMode = true;
+			}
+		}
 	}
 	
 	private void acceptConnection(InetSocketAddress address, ByteBuffer buffer) {
@@ -96,7 +133,7 @@ public class Server {
 			}
 		}
 		
-		send(client, "pong " + System.currentTimeMillis());
+		queue(client, "pong " + roundTripTime);
 	}
 	
 	private boolean isMostRecentPacket(int p1, int p2, int maxNumber) {
@@ -107,31 +144,32 @@ public class Server {
 		// checks the packet header for confirmations of past packets
 		Iterator<Packet> i = client.packets.iterator();
 		while (i.hasNext()) {
-			int packetNumber = i.next().id;
-			if (client.ack == packetNumber) {
+			Packet packet = i.next();
+			if (client.ack == packet.id) {
+				roundTripTime = roundTripTime * 0.9f + (System.currentTimeMillis() - packet.sentTime) * 0.1f;
 				i.remove();
 			} else {
-				if ((client.remoteAckBitfield & (1 << (client.ack - packetNumber - 1))) != 0) {
+				if ((client.remoteAckBitfield & (1 << (client.ack - packet.id - 1))) != 0) {
 					i.remove();
 				}
 			}
 		}
 	}
 	
-	private void resendLostPackets() {
+	private void requeueLostPackets() {
 		// if client hasn't confirmed a packet in a second it is resend
 		for (Client client : clients) {
 			List<String> lostMessages = new ArrayList<String>();
 			Iterator<Packet> i = client.packets.iterator();
 			while (i.hasNext()) {
 				Packet packet = i.next();
-				if (System.currentTimeMillis() - packet.sentTime > 1000) {
+				if (System.currentTimeMillis() - packet.sentTime >= 1000) {
 					lostMessages.add(new String(packet.data));
 					i.remove();
 				} 
 			}
 			for (String message : lostMessages) {
-				send(client, message);
+				queue(client, message);
 			}
 		}
 	}
@@ -139,7 +177,7 @@ public class Server {
 	private void listen() throws IOException {
 		// listen for new messages
 		// ignore messages that do not identify themselves with protocol id
-		ByteBuffer buffer = ByteBuffer.allocate(BUFFER_SIZE);
+		ByteBuffer buffer = ByteBuffer.allocate(bufferSize);
 		buffer.clear();
 		
 		InetSocketAddress address = (InetSocketAddress) channel.receive(buffer);
@@ -152,28 +190,44 @@ public class Server {
 		}
 	}
 	
-	private void send(Client client, String data) {
-		// send a packet containing a header and the data
-		try {
-			ByteBuffer buffer = ByteBuffer.allocate(256);
-			buffer.clear();
-			buffer.putInt(1337); // protocol id
-			buffer.putInt(client.localPacketNumber); // current known sent packet number
-			buffer.putInt(client.remotePacketNumber); // current known received packet number
-			buffer.putInt(client.localAckBitfield);
-			buffer.put(data.getBytes());
-			buffer.flip();
-			channel.send(buffer, client.address);
-			Packet packet = new Packet();
-			packet.id = client.localPacketNumber;
-			packet.data = new String(data);
-			packet.sentTime = System.currentTimeMillis();
-			client.packets.add(packet);
-			
-			client.localPacketNumber++;
-		} catch (IOException e) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
+	private void queue(Client client, String data) {
+		// queue a packet containing a header and the data
+		ByteBuffer buffer = ByteBuffer.allocate(bufferSize);
+		buffer.clear();
+		buffer.putInt(1337); // protocol id
+		buffer.putInt(client.localPacketNumber); // current known sent packet number
+		buffer.putInt(client.remotePacketNumber); // current known received packet number
+		buffer.putInt(client.localAckBitfield);
+		buffer.put(data.getBytes());
+		QueueData queueData = new QueueData();
+		queueData.buffer = buffer;
+		queueData.data = data;
+		queueData.localPacketNumber = client.localPacketNumber;
+		client.queue.add(queueData);
+		
+		client.localPacketNumber++;
+	}
+	
+	private void send() {
+		// send queued messages to each client one per call
+		for (Client client : clients) {
+			if (System.currentTimeMillis() - client.lastSentTime >= queueDelay && client.queue.size() > 0) {
+				client.lastSentTime = System.currentTimeMillis();
+				Packet packet = new Packet();
+				packet.id = client.queue.get(0).localPacketNumber;
+				packet.data = new String(client.queue.get(0).data);
+				packet.sentTime = System.currentTimeMillis();
+				client.packets.add(packet);
+				
+				client.queue.get(0).buffer.flip();
+				try {
+					channel.send(client.queue.get(0).buffer, client.address);
+				} catch (IOException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
+				client.queue.remove(0);
+			}
 		}
 	}
 }
