@@ -37,7 +37,7 @@ public class Server {
 		millis = System.currentTimeMillis();
 		flowControl();
 		listen();
-		requeueLostPackets();
+		checkPackets();
 		send();
 		checkConnections();
 	}
@@ -50,10 +50,8 @@ public class Server {
 	
 	private void acceptConnection(InetSocketAddress address, ByteBuffer buffer) {
 		// add a new client
-		Client newClient = new Client();
-		newClient.address = address;
-		clients.add(newClient);
-		handleClient(newClient, buffer);
+		clients.add(new Client(address));
+		handleClient(clients.get(clients.size() - 1), buffer);
 	}
 	
 	private void checkConnections() {
@@ -61,7 +59,11 @@ public class Server {
 		Iterator<Client> i = clients.iterator();
 		while (i.hasNext()) {
 			Client client = i.next();
-			if (millis - client.lastPacketTime > timeout) {
+			if (millis - client.lastArrivalTime > timeout) {
+				// client hasn't sent messages for (timeout) seconds
+				i.remove();
+			} else if (client.unsentPackets.size() > (1000.0f / client.dispatchDelay) * timeout) {
+				// client hasn't confirmed (timeout) seconds worth of packets
 				i.remove();
 			}
 		}
@@ -82,7 +84,7 @@ public class Server {
 	
 	private void handleClient(Client client, ByteBuffer buffer) {
 		// respond to clients message
-		client.lastPacketTime = millis;
+		client.lastArrivalTime = millis;
 		int sequence = buffer.getInt();
 		int ack = buffer.getInt();
 		int ackBitField = buffer.getInt();
@@ -94,7 +96,6 @@ public class Server {
 			client.remotePacketNumber = sequence;
 			client.ack = ack;
 			client.remoteAckBitfield = ackBitField;
-			checkPackets(client);
 			Iterator<Integer> i = client.packetNumberQueue.iterator();
 			while (i.hasNext()) {
 				int packetNumber = i.next().intValue();
@@ -108,40 +109,32 @@ public class Server {
 		queue(client, "pong");
 	}
 	
-	private boolean isMostRecentPacket(int p1, int p2, int maxNumber) {
+	private boolean isMostRecentPacket(int s1, int s2, int maxNumber) {
+		long p1 = (long)s1 & 0xffffffffL;
+		long p2 = (long)s2 & 0xffffffffL;
 		return (p1 > p2) && (p1 - p2 <= maxNumber / 2) || (p2 > p1) && (p2 - p1 > maxNumber / 2);
 	}
 	
-	private void checkPackets(Client client) {
+	private void checkPackets() {
 		// checks the packet header for confirmations of past packets
-		Iterator<Packet> i = client.packets.iterator();
-		while (i.hasNext()) {
-			Packet packet = i.next();
-			if (client.ack == packet.id) {
-				client.roundTripTime = client.roundTripTime * 0.9f + (millis - packet.sentTime) * 0.1f;
-				i.remove();
-			} else {
-				if ((client.remoteAckBitfield & (1 << (client.ack - packet.id - 1))) != 0) {
-					i.remove();
-				}
-			}
-		}
-	}
-	
-	private void requeueLostPackets() {
-		// if client hasn't confirmed a packet in a second it is resend
 		for (Client client : clients) {
-			List<String> lostMessages = new ArrayList<String>();
-			Iterator<Packet> i = client.packets.iterator();
+			Iterator<Packet> i = client.unconfirmedPackets.iterator();
 			while (i.hasNext()) {
 				Packet packet = i.next();
-				if (millis - packet.sentTime >= 1000) {
-					lostMessages.add(new String(packet.data));
+				if (millis - packet.timeSent >= 1000) {
+					// if packet isn't confirmed in a second resend it
+					queue(client, packet.buffer);
 					i.remove();
-				} 
-			}
-			for (String message : lostMessages) {
-				queue(client, message);
+				} else {
+					if (client.ack == packet.id) {
+						client.roundTripTime = client.roundTripTime * 0.9f + (millis - packet.timeSent) * 0.1f;
+						i.remove();
+					} else if (packet.id < client.ack && packet.id > client.ack - 33
+							&& (client.remoteAckBitfield & (1 << (client.ack - packet.id - 1))) != 0) {
+						client.roundTripTime = client.roundTripTime * 0.9f + (millis - packet.timeSent) * 0.1f;
+						i.remove();
+					}
+				}
 			}
 		}
 	}
@@ -171,34 +164,30 @@ public class Server {
 		buffer.putInt(client.remotePacketNumber); // current known received packet number
 		buffer.putInt(client.localAckBitfield);
 		buffer.put(data.getBytes());
-		QueueData queueData = new QueueData();
-		queueData.buffer = buffer;
-		queueData.data = data;
-		queueData.localPacketNumber = client.localPacketNumber;
-		client.queue.add(queueData);
 		
+		client.unsentPackets.add(new Packet(client.localPacketNumber, buffer));
 		client.localPacketNumber++;
+	}
+	
+	private void queue(Client client, ByteBuffer buffer) {
+		// queue a packet with a predone buffer
+		client.unsentPackets.add(new Packet(client.localPacketNumber, buffer));
 	}
 	
 	private void send() {
 		// send queued messages to each client one per call
 		for (Client client : clients) {
-			if (millis - client.lastSentTime >= client.queueDelay && client.queue.size() > 0) {
-				client.lastSentTime = millis;
-				Packet packet = new Packet();
-				packet.id = client.queue.get(0).localPacketNumber;
-				packet.data = new String(client.queue.get(0).data);
-				packet.sentTime = millis;
-				client.packets.add(packet);
-				
-				client.queue.get(0).buffer.flip();
+			if (millis - client.lastDispatchTime >= client.dispatchDelay && client.unsentPackets.size() > 0) {
+				client.lastDispatchTime = millis;
+				client.unconfirmedPackets.add(new Packet(client.unsentPackets.get(0).id, client.unsentPackets.get(0).buffer, millis));
+				client.unsentPackets.get(0).buffer.flip();
 				try {
-					channel.send(client.queue.get(0).buffer, client.address);
+					channel.send(client.unsentPackets.get(0).buffer, client.address);
 				} catch (IOException e) {
 					// TODO Auto-generated catch block
 					e.printStackTrace();
 				}
-				client.queue.remove(0);
+				client.unsentPackets.remove(0);
 			}
 		}
 	}

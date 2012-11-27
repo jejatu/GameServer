@@ -26,8 +26,11 @@ public class Main {
 					for (Client client : server.clients) {
 						info += client.address.getHostName() + ":" + client.address.getPort() + "<br>";
 						info += "RTT: " + client.roundTripTime + "<br>";
-						info += "Unconfirmed packets: " + client.packets.size() + "<br>";
-						info += "Queue: " + client.queue.size() + "<br>";
+						info += "Local packet: " + client.localPacketNumber + "<br>";
+						info += "Remote packet: " + client.remotePacketNumber + "<br>";
+						info += "Packets per second: " + (1000.0f / client.dispatchDelay) + "<br>";
+						info += "Unconfirmed packets: " + client.unconfirmedPackets.size() + "<br>";
+						info += "Unsent packets: " + client.unsentPackets.size() + "<br>";
 						info += "<br>";
 					}
 					info += "</html>";

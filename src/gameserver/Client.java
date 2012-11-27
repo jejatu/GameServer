@@ -6,29 +6,34 @@ import java.util.List;
 
 public class Client {
 	InetSocketAddress address;
-	long lastPacketTime = 0;
-	long lastSentTime = 0;
+	long lastArrivalTime = 0;
+	long lastDispatchTime = 0;
 	int localPacketNumber = 0;
 	int remotePacketNumber = 0;
 	int ack = 0;
 	int localAckBitfield = 0;
 	int remoteAckBitfield = 0;
 	float roundTripTime = 0;
-	int queueDelay = 33;
+	int dispatchDelay = 33;
 	boolean goodMode = true;
 	long lastHighLatencyTime = 0;
 	long modeChangeTime = 0;
 	long lastModeChange = 0;
+	long highLatency = 250;
 	List<Integer> packetNumberQueue = new ArrayList<Integer>();
-	List<Packet> packets = new ArrayList<Packet>();
-	List<QueueData> queue = new ArrayList<QueueData>();
+	List<Packet> unconfirmedPackets = new ArrayList<Packet>();
+	List<Packet> unsentPackets = new ArrayList<Packet>();
+	
+	public Client(InetSocketAddress address) {
+		this.address = address;
+	}
 	
 	public void simpleBinaryFlowControl(long millis) {
 		// a simple flow control from
 		// http://gafferongames.com/networking-for-game-programmers/reliability-and-flow-control/
 		if (goodMode) {
-			queueDelay = 33;
-			if (roundTripTime > 250) {
+			dispatchDelay = 33;
+			if (roundTripTime > highLatency) {
 				if (millis - lastModeChange < 10000) {
 					if (modeChangeTime * 2 < 60000) modeChangeTime *= 2;
 				}
@@ -41,8 +46,8 @@ public class Client {
 				}
 			}
 		} else {
-			queueDelay = 100;
-			if (roundTripTime > 250) {
+			dispatchDelay = 100;
+			if (roundTripTime > highLatency) {
 				lastHighLatencyTime = millis;
 			}
 			if (millis - lastHighLatencyTime > modeChangeTime) {
