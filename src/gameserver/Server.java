@@ -9,28 +9,22 @@ import java.util.Iterator;
 import java.util.List;
 
 public class Server {
-	private int bufferSize = 256;
-	private int protocolId = 0;
 	private DatagramChannel channel;
-	private List<Client> clients = new ArrayList<Client>();
-	private float roundTripTime = 0;
-	private int queueDelay = 33;
-	private boolean goodMode = true;
-	private long lastHighLatencyTime = 0;
-	private long modeChangeTime = 0;
-	private long lastModeChange = 0;
-
+	private long millis = 0;
+	
+	public List<Client> clients = new ArrayList<Client>();
+	public int protocolId = 0;
 	public int timeout = 10000;
 	public boolean connected = false;
+	public int bufferSize = 256;
 	
-	public void start(int id, int port, int bufferSize) throws IOException {
+	public void start(int id, int port) throws IOException {
 		// start the server by opening non-blocking udp port
 		protocolId = id;
 		channel = DatagramChannel.open();
 		channel.configureBlocking(false);
 		channel.socket().bind(new InetSocketAddress(port));
 		connected = true;
-		this.bufferSize = bufferSize;
 	}
 	
 	public void end() throws IOException {
@@ -40,39 +34,17 @@ public class Server {
 	}
 	
 	public void tick() throws IOException {
-		simpleBinaryFlowControl();
+		millis = System.currentTimeMillis();
+		flowControl();
 		listen();
 		requeueLostPackets();
 		send();
 		checkConnections();
 	}
 	
-	private void simpleBinaryFlowControl() {
-		// a simple flow control from
-		// http://gafferongames.com/networking-for-game-programmers/reliability-and-flow-control/
-		if (goodMode) {
-			queueDelay = 33;
-			if (roundTripTime > 250) {
-				if (System.currentTimeMillis() - lastModeChange < 10000) {
-					if (modeChangeTime * 2 < 60000) modeChangeTime *= 2;
-				}
-				lastModeChange = System.currentTimeMillis();
-				goodMode = false;
-			}
-			if (System.currentTimeMillis() - lastModeChange >= 10000) {
-				if (modeChangeTime / 2 >= 1000) { 
-					modeChangeTime /= 2;
-				}
-			}
-		} else {
-			queueDelay = 100;
-			if (roundTripTime > 250) {
-				lastHighLatencyTime = System.currentTimeMillis();
-			}
-			if (System.currentTimeMillis() - lastHighLatencyTime > modeChangeTime) {
-				lastModeChange = System.currentTimeMillis();
-				goodMode = true;
-			}
+	private void flowControl() {
+		for (Client client : clients) {
+			client.simpleBinaryFlowControl(millis);
 		}
 	}
 	
@@ -89,7 +61,7 @@ public class Server {
 		Iterator<Client> i = clients.iterator();
 		while (i.hasNext()) {
 			Client client = i.next();
-			if (System.currentTimeMillis() - client.lastPacketTime > timeout) {
+			if (millis - client.lastPacketTime > timeout) {
 				i.remove();
 			}
 		}
@@ -110,7 +82,7 @@ public class Server {
 	
 	private void handleClient(Client client, ByteBuffer buffer) {
 		// respond to clients message
-		client.lastPacketTime = System.currentTimeMillis();
+		client.lastPacketTime = millis;
 		int sequence = buffer.getInt();
 		int ack = buffer.getInt();
 		int ackBitField = buffer.getInt();
@@ -133,7 +105,7 @@ public class Server {
 			}
 		}
 		
-		queue(client, "pong " + roundTripTime);
+		queue(client, "pong");
 	}
 	
 	private boolean isMostRecentPacket(int p1, int p2, int maxNumber) {
@@ -146,7 +118,7 @@ public class Server {
 		while (i.hasNext()) {
 			Packet packet = i.next();
 			if (client.ack == packet.id) {
-				roundTripTime = roundTripTime * 0.9f + (System.currentTimeMillis() - packet.sentTime) * 0.1f;
+				client.roundTripTime = client.roundTripTime * 0.9f + (millis - packet.sentTime) * 0.1f;
 				i.remove();
 			} else {
 				if ((client.remoteAckBitfield & (1 << (client.ack - packet.id - 1))) != 0) {
@@ -163,7 +135,7 @@ public class Server {
 			Iterator<Packet> i = client.packets.iterator();
 			while (i.hasNext()) {
 				Packet packet = i.next();
-				if (System.currentTimeMillis() - packet.sentTime >= 1000) {
+				if (millis - packet.sentTime >= 1000) {
 					lostMessages.add(new String(packet.data));
 					i.remove();
 				} 
@@ -211,12 +183,12 @@ public class Server {
 	private void send() {
 		// send queued messages to each client one per call
 		for (Client client : clients) {
-			if (System.currentTimeMillis() - client.lastSentTime >= queueDelay && client.queue.size() > 0) {
-				client.lastSentTime = System.currentTimeMillis();
+			if (millis - client.lastSentTime >= client.queueDelay && client.queue.size() > 0) {
+				client.lastSentTime = millis;
 				Packet packet = new Packet();
 				packet.id = client.queue.get(0).localPacketNumber;
 				packet.data = new String(client.queue.get(0).data);
-				packet.sentTime = System.currentTimeMillis();
+				packet.sentTime = millis;
 				client.packets.add(packet);
 				
 				client.queue.get(0).buffer.flip();
