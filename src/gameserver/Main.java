@@ -3,6 +3,8 @@ package gameserver;
 import java.awt.BorderLayout;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.List;
 
 import javax.swing.JFrame;
 import javax.swing.JLabel;
@@ -11,20 +13,26 @@ public class Main {
 	public static void main(String[] args) {
 		JFrame frame = new JFrame("Server");
 		frame.setSize(640, 480);
-		frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
 		JLabel debugLabel = new JLabel();
 		frame.getContentPane().add(debugLabel, BorderLayout.CENTER);
 		frame.setVisible(true);
 		Server server = new Server();
-		Client client = new Client();
+		List<Client> clients = new ArrayList<Client>();
+		clients.add(new Client());
+		clients.add(new Client());
+		clients.add(new Client());
 		try {
 			long lastTime = System.currentTimeMillis();
 			server.start(1337, 4444);
-			client.start(1337, 0);
-			client.connect(new InetSocketAddress("192.168.1.66", 4444));
-			while (server.connected) {
+			for (Client client : clients) {
+				client.start(1337, 0);
+				client.connect(new InetSocketAddress("192.168.1.66", 4444));
+			}
+			while (frame.isFocused()) {
 				server.tick();
-				client.tick();
+				for (Client client : clients) {
+					client.tick();
+				}
 				if (System.currentTimeMillis() - lastTime > 1000) {
 					String info = new String();
 					info += "<html>";
@@ -44,7 +52,10 @@ public class Main {
 				}
 			}
 			server.end();
-			client.end();
+			for (Client client : clients) {
+				client.end();
+			}
+			frame.dispose();
 		} catch (IOException e) {
 			e.printStackTrace();
 		}

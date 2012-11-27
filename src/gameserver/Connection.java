@@ -6,15 +6,15 @@ import java.util.List;
 
 public class Connection {
 	InetSocketAddress address;
-	long lastArrivalTime = 0;
-	long lastDispatchTime = 0;
-	int localPacketNumber = 0;
-	int remotePacketNumber = 0;
-	int ack = 0;
-	int localAckBitfield = 0;
-	int remoteAckBitfield = 0;
-	float roundTripTime = 0;
-	int dispatchDelay = 33;
+	long lastArrivalTime = 0; // last time packet from this connection came
+	long lastDispatchTime = 0; // last time packet sent to this connection
+	int localPacketNumber = 0; // last packet id for sent packets
+	int remotePacketNumber = 0; // last packet id for received packets
+	int ack = 0; // ack is the last packet id connection has confirmed to have received
+	int localAckBitfield = 0; // local bitfield sent to connection to confirm 32 last packets
+	int remoteAckBitfield = 0; // bitfield connection has sent to confirm packets
+	float roundTripTime = 0; // ping, latency, etc.
+	int dispatchDelay = 33; // packets are queued and sent after this delay
 	int highDelay = 100;
 	int lowDelay = 33;
 	boolean hasFlowControl = true;
@@ -23,7 +23,7 @@ public class Connection {
 	long modeChangeTime = 0;
 	long lastModeChange = 0;
 	long highLatency = 250;
-	List<Integer> packetNumberQueue = new ArrayList<Integer>();
+	List<Integer> receivedPacketNumbers = new ArrayList<Integer>();
 	List<Packet> unconfirmedPackets = new ArrayList<Packet>();
 	List<Packet> unsentPackets = new ArrayList<Packet>();
 	

@@ -15,7 +15,6 @@ public class Protocol {
 	public List<Connection> connections = new ArrayList<Connection>();
 	public int protocolId = 0;
 	public int timeout = 10000;
-	public boolean connected = false;
 	public int bufferSize = 256;
 	
 	public void start(int id, int port) throws IOException {
@@ -24,7 +23,6 @@ public class Protocol {
 		channel = DatagramChannel.open();
 		channel.configureBlocking(false);
 		channel.socket().bind(new InetSocketAddress(port));
-		connected = true;
 	}
 	
 	public void end() throws IOException {
@@ -35,31 +33,26 @@ public class Protocol {
 	
 	public void tick() throws IOException {
 		millis = System.currentTimeMillis();
-		flowControl();
 		listen();
-		checkPackets();
-		send();
-		checkConnections();
-	}
-	
-	private void flowControl() {
 		for (Connection connection : connections) {
-			connection.simpleBinaryFlowControl(millis);
+			flowControl(connection);
+			checkPackets(connection);
+			sendPackets(connection);
+			checkTimeout(connection);
 		}
 	}
 	
-	private void checkConnections() {
-		// iterate through connections and delete connections that have not send messages for some time
-		Iterator<Connection> i = connections.iterator();
-		while (i.hasNext()) {
-			Connection connection = i.next();
-			if (millis - connection.lastArrivalTime > timeout) {
-				// connection hasn't sent messages for (timeout) seconds
-				i.remove();
-			} else if (connection.unsentPackets.size() > (1000.0f / connection.dispatchDelay) * timeout) {
-				// connection hasn't confirmed (timeout) seconds worth of packets
-				i.remove();
-			}
+	private void flowControl(Connection connection) {
+		connection.simpleBinaryFlowControl(millis);
+	}
+	
+	private void checkTimeout(Connection connection) {
+		if (millis - connection.lastArrivalTime > timeout) {
+			// connection hasn't sent messages for (timeout) seconds
+			connections.remove(connection);
+		} else if (connection.unsentPackets.size() > (1000.0f / connection.dispatchDelay) * timeout) {
+			// connection hasn't confirmed (timeout) seconds worth of packets
+			connections.remove(connection);
 		}
 	}
 	
@@ -77,11 +70,13 @@ public class Protocol {
 		// if yes, save it and update the queue of packets ids received
 		// with the queue we can tell to the connection which packets we have received
 		if (isMostRecentPacket(sequence, connection.remotePacketNumber, Integer.MAX_VALUE)) {
-			connection.packetNumberQueue.add(connection.remotePacketNumber);
+			connection.receivedPacketNumbers.add(connection.remotePacketNumber);
 			connection.remotePacketNumber = sequence;
 			connection.ack = ack;
 			connection.remoteAckBitfield = ackBitField;
-			Iterator<Integer> i = connection.packetNumberQueue.iterator();
+			// last 32 packet numbers are stored and used to create ackBitfield to be sent to the connection
+			// the ackBitfield confirms the connection which packets we have received
+			Iterator<Integer> i = connection.receivedPacketNumbers.iterator();
 			while (i.hasNext()) {
 				int packetNumber = i.next().intValue();
 				connection.localAckBitfield = connection.localAckBitfield | (1 << (connection.remotePacketNumber - packetNumber - 1));
@@ -100,25 +95,25 @@ public class Protocol {
 		return (p1 > p2) && (p1 - p2 <= maxNumber / 2) || (p2 > p1) && (p2 - p1 > maxNumber / 2);
 	}
 	
-	private void checkPackets() {
+	private void checkPackets(Connection connection) {
 		// checks the packet header for confirmations of past packets
-		for (Connection connection : connections) {
-			Iterator<Packet> i = connection.unconfirmedPackets.iterator();
-			while (i.hasNext()) {
-				Packet packet = i.next();
-				if (millis - packet.timeSent >= 1000) {
-					// if packet isn't confirmed in a second resend it
-					queue(connection, packet.buffer);
+		Iterator<Packet> i = connection.unconfirmedPackets.iterator();
+		while (i.hasNext()) {
+			Packet packet = i.next();
+			if (millis - packet.timeSent >= 1000) {
+				// if packet isn't confirmed in a second resend it
+				queue(connection, packet.buffer);
+				i.remove();
+			} else {
+				if (connection.ack == packet.id) {
+					// packet confirmed
+					connection.roundTripTime = connection.roundTripTime * 0.9f + (millis - packet.timeSent) * 0.1f;
 					i.remove();
-				} else {
-					if (connection.ack == packet.id) {
-						connection.roundTripTime = connection.roundTripTime * 0.9f + (millis - packet.timeSent) * 0.1f;
-						i.remove();
-					} else if (packet.id < connection.ack && packet.id > connection.ack - 33
-							&& (connection.remoteAckBitfield & (1 << (connection.ack - packet.id - 1))) != 0) {
-						connection.roundTripTime = connection.roundTripTime * 0.9f + (millis - packet.timeSent) * 0.1f;
-						i.remove();
-					}
+				} else if (packet.id < connection.ack && packet.id > connection.ack - 33
+						&& (connection.remoteAckBitfield & (1 << (connection.ack - packet.id - 1))) != 0) {
+					// the first "confirm packet" lost but packet confirmed using ackBitfield
+					connection.roundTripTime = connection.roundTripTime * 0.9f + (millis - packet.timeSent) * 0.1f;
+					i.remove();
 				}
 			}
 		}
@@ -173,22 +168,20 @@ public class Protocol {
 		// client and server handle responses
 	}
 	
-	private void send() {
+	private void sendPackets(Connection connection) {
 		// send queued messages to each connection one per call
-		for (Connection connection : connections) {
-			if ((!connection.hasFlowControl || 
-					millis - connection.lastDispatchTime >= connection.dispatchDelay) && 
-					connection.unsentPackets.size() > 0) {
-				connection.lastDispatchTime = millis;
-				connection.unconfirmedPackets.add(new Packet(connection.unsentPackets.get(0).id, connection.unsentPackets.get(0).buffer, millis));
-				try {
-					channel.send(connection.unsentPackets.get(0).buffer, connection.address);
-				} catch (IOException e) {
-					// TODO Auto-generated catch block
-					e.printStackTrace();
-				}
-				connection.unsentPackets.remove(0);
+		if ((!connection.hasFlowControl || 
+				millis - connection.lastDispatchTime >= connection.dispatchDelay) && 
+				connection.unsentPackets.size() > 0) {
+			connection.lastDispatchTime = millis;
+			connection.unconfirmedPackets.add(new Packet(connection.unsentPackets.get(0).id, connection.unsentPackets.get(0).buffer, millis));
+			try {
+				channel.send(connection.unsentPackets.get(0).buffer, connection.address);
+			} catch (IOException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
 			}
+			connection.unsentPackets.remove(0);
 		}
 	}
 }
